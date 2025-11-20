@@ -1,11 +1,14 @@
 import os
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from fastapi.responses import StreamingResponse
 from typing import Any, Dict
 
 from database import create_document
 from schemas import Lead
+
+import io
+import tarfile
 
 app = FastAPI()
 
@@ -71,11 +74,50 @@ def test_database():
         response["database"] = f"❌ Error: {str(e)[:50]}"
     
     # Check environment variables
-    import os
     response["database_url"] = "✅ Set" if os.getenv("DATABASE_URL") else "❌ Not Set"
     response["database_name"] = "✅ Set" if os.getenv("DATABASE_NAME") else "❌ Not Set"
     
     return response
+
+
+@app.get("/download-backend")
+def download_backend_tar():
+    """Stream a tar.gz archive of the backend project (excluding virtual/ephemeral files)."""
+    buffer = io.BytesIO()
+
+    excludes = {".git", "__pycache__", "logs", ".env", ".venv", "env", ".pytest_cache"}
+
+    def _filter(ti: tarfile.TarInfo) -> tarfile.TarInfo | None:
+        parts = ti.name.split(os.sep)
+        if any(part in excludes for part in parts):
+            return None
+        # Prevent absolute paths
+        ti.name = os.path.join("backend", ti.name)
+        return ti
+
+    with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
+        for root, dirs, files in os.walk("."):
+            # prune excluded directories during walk
+            dirs[:] = [d for d in dirs if d not in excludes]
+            for name in files:
+                if name in excludes:
+                    continue
+                full_path = os.path.join(root, name)
+                rel_path = os.path.relpath(full_path, ".")
+                if any(seg in excludes for seg in rel_path.split(os.sep)):
+                    continue
+                ti = tar.gettarinfo(full_path, arcname=rel_path)
+                if ti is None:
+                    continue
+                ti = _filter(ti)
+                if ti is None:
+                    continue
+                with open(full_path, "rb") as f:
+                    tar.addfile(ti, f)
+
+    buffer.seek(0)
+    headers = {"Content-Disposition": "attachment; filename=backend.tar.gz"}
+    return StreamingResponse(buffer, media_type="application/gzip", headers=headers)
 
 
 if __name__ == "__main__":
